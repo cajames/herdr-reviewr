@@ -141,8 +141,19 @@ pub enum BaseProbe {
 /// One base picker row: a branch with its trail facts, or a revision with its oid.
 #[derive(Clone, Debug)]
 pub enum BaseChoice {
-    Branch { name: String, pr_base: bool, is_default: bool, current: bool, tip_secs: u64 },
-    Rev { name: String, oid: String },
+    Branch {
+        name: String,
+        pr_base: bool,
+        /// The branch this one stacks on, which `b` in `branch` flips to.
+        parent: bool,
+        is_default: bool,
+        current: bool,
+        tip_secs: u64,
+    },
+    Rev {
+        name: String,
+        oid: String,
+    },
 }
 
 impl BaseChoice {
@@ -156,6 +167,11 @@ impl BaseChoice {
     #[must_use]
     pub fn pr_base(&self) -> bool {
         matches!(self, Self::Branch { pr_base: true, .. })
+    }
+
+    #[must_use]
+    pub fn parent(&self) -> bool {
+        matches!(self, Self::Branch { parent: true, .. })
     }
 
     #[must_use]
@@ -3653,6 +3669,7 @@ impl App {
                 git::ResolvedBase::Branch { name, .. } => BaseChoice::Branch {
                     name,
                     pr_base: false,
+                    parent: false,
                     is_default: false,
                     current: false,
                     tip_secs: 0,
@@ -4900,6 +4917,7 @@ impl App {
             }
         };
         let (winner, default) = (resolution.status.winner, resolution.default);
+        let parent = default.as_deref().and_then(|d| self.parent_base(d));
         let listed = git::list_branches(&self.repo).and_then(|rows| {
             let current = git::checked_out_branch(&self.repo)?;
             Ok((rows, current))
@@ -4919,6 +4937,7 @@ impl App {
             .into_iter()
             .map(|b| BaseChoice::Branch {
                 pr_base: target.as_deref() == Some(b.name.as_str()),
+                parent: parent.as_deref() == Some(b.name.as_str()),
                 is_default: default.as_deref() == Some(b.name.as_str()),
                 current: current.as_deref() == Some(b.name.as_str()),
                 tip_secs: b.tip_secs,
@@ -4926,7 +4945,7 @@ impl App {
             })
             .collect();
         // A stable sort, so recency still orders the promoted pair and the rest alike.
-        rows.sort_by_key(|r| (!r.pr_base(), !r.is_default()));
+        rows.sort_by_key(|r| (!r.pr_base(), !r.parent(), !r.is_default()));
         if let Some(git::ResolvedBase::Rev { spelling, oid }) = &winner
             && !rows.iter().any(|r| r.name() == spelling)
         {
@@ -4984,8 +5003,52 @@ impl App {
         };
         let Some(choice) = choice else { return Ok(()) };
         self.close_base_picker();
-        let write = git::write_base_pick(&self.repo, choice.name());
-        if let Err(e) = write {
+        self.apply_base_pick(choice.name())
+    }
+
+    /// `b`: enter `branch`, or flip its base between the default branch and the parent once there.
+    pub fn branch_key(&mut self) -> Result<()> {
+        if self.scope != Scope::Branch || self.composing() || !self.base_pick_available() {
+            return self.set_scope(Scope::Branch);
+        }
+        self.ensure_config_ready()?;
+        let default = match git::default_branch_name(&self.repo) {
+            Ok(Some(default)) => default,
+            Ok(None) => {
+                self.status = "no default branch to compare against".into();
+                return Ok(());
+            }
+            Err(e) => {
+                self.status = e.0;
+                return Ok(());
+            }
+        };
+        let current = self.branch_base.winner.as_ref().map(|w| w.name().to_string());
+        let target = match self.parent_base(&default) {
+            Some(parent) if current.as_deref() != Some(parent.as_str()) => parent,
+            None if current.as_deref() == Some(default.as_str()) => {
+                self.status = format!("no parent branch: comparing against {default}");
+                return Ok(());
+            }
+            _ => default,
+        };
+        self.apply_base_pick(&target)?;
+        self.status = format!("base: {target}");
+        Ok(())
+    }
+
+    /// The branch this one stacks on: the open PR's base, else the nearest local branch.
+    fn parent_base(&self, default: &str) -> Option<String> {
+        let pr_base = self
+            .pr_snapshot()
+            .filter(|s| s.state == forge::PrState::Open && s.base_ref != default)
+            .map(|s| s.base_ref.clone());
+        pr_base.or_else(|| git::parent_branch(&self.repo, default))
+    }
+
+    /// Save `name` as this worktree's base and rebuild `branch` against it.
+    fn apply_base_pick(&mut self, name: &str) -> Result<()> {
+        if let Err(e) = git::write_base_pick(&self.repo, name) {
             self.status = e.0;
             return Ok(());
         }
@@ -5724,6 +5787,7 @@ mod tests {
             rows: vec![super::BaseChoice::Branch {
                 name: "dev".to_string(),
                 pr_base: false,
+                parent: false,
                 is_default: false,
                 current: false,
                 tip_secs: 0,

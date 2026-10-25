@@ -238,6 +238,10 @@ The branch scope compares against the repo's default branch. To pick another, pr
 the base name in the header. Type to filter, or type any commit reference like `HEAD~2`. The
 pick holds for this worktree until you change it. `--base` overrides it.
 
+On a stacked branch, press `b` again to compare against its parent, and again to go back to the
+default branch. The parent is the open PR's base, else the nearest local branch HEAD is built on.
+The `B` picker tags it `parent`.
+
 ### Editor
 
 `e` opens the file at your line in `$VISUAL`, `$EDITOR`, or git's `core.editor`. Common editors

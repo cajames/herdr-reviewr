@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Stacked branches**: `b` again in the branch scope flips the base between the default branch and the branch this one stacks on: the open PR's base, else the nearest local branch. The flip holds for the worktree, like a `B` pick, and the `B` picker tags the parent.
+
 ## [0.48.0] — 2026-10-19
 
 ### Added
