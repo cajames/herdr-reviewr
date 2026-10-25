@@ -102,6 +102,7 @@ Every key can be rebound ([Keybindings](#keybindings)).
 | `u` `b` `t` `g` | Scope: uncommitted / branch / last turn / commits |
 | `B` | Pick the base branch |
 | `G` | Pick commits |
+| `W` | Pick the worktree to review |
 | `j` `k` · `↑` `↓` | Move |
 | `]` `[` | Next / previous change |
 | `f` `F` | Next / previous file |
@@ -267,7 +268,7 @@ keys help non-Latin layouts: bind the character your layout types on the same ke
 | `next-hunk` / `prev-hunk` | `]` / `[` |
 | `next-file` / `prev-file` | `f` / `F` |
 | `scope-uncommitted` / `scope-branch` / `scope-last-turn` / `scope-commits` | `u` / `b` / `t` / `g` |
-| `base-pick` / `commit-pick` | `B` / `G` |
+| `base-pick` / `commit-pick` / `worktree-pick` | `B` / `G` / `W` |
 | `tab-changes` / `tab-all-files` / `tab-pr` | `1` / `2` / `3` |
 | `wrap` | `w` |
 | `rendered` | `m` |

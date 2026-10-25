@@ -122,6 +122,35 @@ pub fn worktree_of(path: &Path) -> Worktree {
     }
 }
 
+/// One worktree of the repository: its top level and checked-out branch, `None` when detached.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Checkout {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+}
+
+/// The repository's worktrees in git's order, main first; bare and prunable ones left out.
+pub fn worktrees(repo: &Path) -> Result<Vec<Checkout>> {
+    let out = git(repo, &["worktree", "list", "--porcelain"])?;
+    Ok(out.split("\n\n").filter_map(worktree_entry).collect())
+}
+
+/// One `--porcelain` stanza; a prunable worktree's directory is gone, so it is none.
+fn worktree_entry(stanza: &str) -> Option<Checkout> {
+    let mut lines = stanza.lines();
+    let path = PathBuf::from(lines.next()?.strip_prefix("worktree ")?);
+    let mut branch = None;
+    for line in lines {
+        if line == "bare" || line.starts_with("prunable") {
+            return None;
+        }
+        if let Some(name) = line.strip_prefix("branch refs/heads/") {
+            branch = Some(name.to_string());
+        }
+    }
+    Some(Checkout { path, branch })
+}
+
 /// The worktree's own git dir and the common dir, canonical; the same in a main checkout.
 pub fn git_dirs(repo: &Path) -> Option<(PathBuf, PathBuf)> {
     let out = git(repo, &["rev-parse", "--absolute-git-dir", "--git-common-dir"]).ok()?;

@@ -112,6 +112,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Mode::Picker => Some(render_agent_picker),
         Mode::BasePick => Some(render_base_picker),
         Mode::CommitPick => Some(render_commit_picker),
+        Mode::WorktreePick => Some(render_worktree_picker),
         Mode::Normal | Mode::Composing { .. } | Mode::Search | Mode::Find => None,
     };
     if let Some(render_popup) = popup {
@@ -2857,6 +2858,8 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::MovePickerRow => (format!("1-9 {} {}", hint(K::Down), hint(K::Up)), "move"),
         A::BasePick => (hint(K::BasePick), "base"),
         A::CommitPick => (hint(K::CommitPick), "commits"),
+        A::WorktreePick => (hint(K::WorktreePick), "worktrees"),
+        A::PickWorktree => ("enter".into(), "review"),
         A::PickCommitRun => {
             let n = app.commit_picker.as_ref().map_or(0, crate::app::CommitPicker::run_len);
             return ("enter".into(), if n > 1 { format!("open {n}") } else { "open".into() });
@@ -3344,6 +3347,87 @@ pub fn hit_picker_row(area: Rect, app: &App, col: u16, row: u16) -> Option<usize
     let inner = picker_inner(picker_popup(area, app));
     let first = picker_scroll(app, inner.height as usize);
     menu_hit(inner, 0, first, app.picker_rows.len(), col, row)
+}
+
+// --- Worktree picker ------------------------------------------
+
+fn worktree_popup(area: Rect, app: &App) -> Rect {
+    let name_width = worktree_name_width(app);
+    let widest = app
+        .worktree_rows
+        .iter()
+        .map(|row| 4 + name_width + 2 + worktree_trail(row).width())
+        .max()
+        .unwrap_or(0);
+    menu_popup(area, app, widest, "review worktree", app.worktree_rows.len() + 2)
+}
+
+fn worktree_name_width(app: &App) -> usize {
+    app.worktree_rows.iter().map(|row| row.name.width()).max().unwrap_or(0)
+}
+
+/// A row's dim trail: branch, then ` · agent`, ` · here`, and parked comments.
+fn worktree_trail(row: &crate::app::WorktreeRow) -> String {
+    let mut words = vec![row.branch.clone().unwrap_or_else(|| "detached".into())];
+    if row.agent {
+        words.push("agent".into());
+    }
+    if row.current {
+        words.push("here".into());
+    }
+    if row.parked > 0 {
+        let noun = if row.parked == 1 { "comment" } else { "comments" };
+        words.push(format!("{} {noun}", row.parked));
+    }
+    words.join(" · ")
+}
+
+fn worktree_scroll(app: &App, rows: usize) -> usize {
+    menu_scroll(app.worktree_cursor, app.worktree_rows.len(), rows)
+}
+
+fn render_worktree_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
+    let popup = worktree_popup(area, app);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.mark(Ink::Accent, Fill::Base)))
+        .title(framed_title("review worktree"));
+    let inner = picker_inner(popup);
+    frame.render_widget(block, popup);
+
+    let name_width = worktree_name_width(app);
+    let first = worktree_scroll(app, inner.height as usize);
+    let items: Vec<ListItem> = app
+        .worktree_rows
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(inner.height as usize)
+        .map(|(i, row)| {
+            let on = cursor_fill(i == app.worktree_cursor);
+            let lead = if i < 9 { format!(" {}  ", i + 1) } else { "    ".to_string() };
+            let pad = name_width.saturating_sub(row.name.width());
+            let spans = vec![
+                Span::styled(lead, Style::default().fg(p.ink(Ink::TextMuted, on))),
+                Span::styled(row.name.clone(), text_style(p, on)),
+                Span::styled(
+                    format!("{}  {}", " ".repeat(pad), worktree_trail(row)),
+                    Style::default().fg(p.ink(Ink::TextMuted, on)),
+                ),
+            ];
+            selectable_row(p, spans, inner.width as usize, on)
+        })
+        .collect();
+    frame.render_widget(List::new(items), inner);
+}
+
+/// The worktree row under the pointer, for click-to-highlight.
+pub fn hit_worktree_row(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
+    let inner = picker_inner(worktree_popup(area, app));
+    let first = worktree_scroll(app, inner.height as usize);
+    menu_hit(inner, 0, first, app.worktree_rows.len(), col, row)
 }
 
 // --- Base picker ----------------------------------------------

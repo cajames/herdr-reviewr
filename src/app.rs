@@ -1,7 +1,7 @@
 //! The terminal-free review state and its transitions.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -326,6 +326,8 @@ pub enum Mode {
     BasePick,
     /// Choosing the `commits` scope's pick.
     CommitPick,
+    /// Choosing the worktree to review.
+    WorktreePick,
     /// The search screen, replacing the body.
     Search,
     /// The read pane's foot band: find in the file, or a line to jump to.
@@ -337,7 +339,12 @@ impl Mode {
     pub fn is_modal(&self) -> bool {
         matches!(
             self,
-            Mode::Composing { .. } | Mode::List | Mode::Picker | Mode::BasePick | Mode::CommitPick
+            Mode::Composing { .. }
+                | Mode::List
+                | Mode::Picker
+                | Mode::BasePick
+                | Mode::CommitPick
+                | Mode::WorktreePick
         )
     }
 }
@@ -559,6 +566,10 @@ pub enum FooterAction {
     MoveCommitRow,
     CommitAnchor,
     CloseCommitPicker,
+    /// Open the worktree picker.
+    WorktreePick,
+    /// The worktree picker's bar.
+    PickWorktree,
     /// The scopes other than the one showing.
     ScopeOther,
     OpenPr,
@@ -714,6 +725,13 @@ pub struct App {
     pub picker_over: Mode,
     /// The agent of the last successful send, which arms the picker.
     pub last_sent_pane: Option<String>,
+    /// The worktree picker's rows, frozen at open.
+    pub worktree_rows: Vec<WorktreeRow>,
+    pub worktree_cursor: usize,
+    /// The worktree picked, which the frame loop leaves to reopen on.
+    pub switch_to: Option<PathBuf>,
+    /// Comment counts parked in the other worktrees this session reviewed, by canonical root.
+    pub parked: HashMap<PathBuf, usize>,
     /// The base picker's rows, filter, and highlight while `Mode::BasePick` is open
     pub base_picker: Option<BasePicker>,
     pub mode: Mode,
@@ -781,6 +799,25 @@ pub struct App {
     snippet_cache: std::cell::RefCell<crate::snippet::SnippetRowCache>,
     /// What herdr said about this pane and its worktree's turns.
     pub herdr: HerdrView,
+}
+
+/// One worktree picker row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeRow {
+    pub path: PathBuf,
+    pub name: String,
+    pub branch: Option<String>,
+    /// The worktree this pane reviews.
+    pub current: bool,
+    /// An agent of this workspace works in it.
+    pub agent: bool,
+    /// Comments left in it, waiting for a switch back.
+    pub parked: usize,
+}
+
+/// `path` as the OS resolves it, so two spellings of one directory compare equal.
+pub fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// What herdr's connection said about this pane, carried whole across a config recovery.
@@ -909,6 +946,10 @@ impl App {
             picker_cursor: 0,
             picker_over: Mode::Normal,
             last_sent_pane: None,
+            worktree_rows: Vec::new(),
+            worktree_cursor: 0,
+            switch_to: None,
+            parked: HashMap::new(),
             base_picker: None,
             mode: Mode::Normal,
             input: String::new(),
@@ -1051,7 +1092,7 @@ impl App {
         let old_mode = old.mode.clone();
         match old_mode {
             // `set_config_error` already closed these.
-            Mode::Normal | Mode::Search | Mode::Find | Mode::Picker => {}
+            Mode::Normal | Mode::Search | Mode::Find | Mode::Picker | Mode::WorktreePick => {}
             Mode::List | Mode::Composing { .. } | Mode::BasePick | Mode::CommitPick => {
                 self.scope = old.scope;
                 self.tab = old.tab;
@@ -3574,7 +3615,9 @@ impl App {
             Mode::Search => self.search.as_mut().map(|s| (&mut s.query, &mut s.caret)),
             Mode::Find => self.find.as_mut().map(|f| (&mut f.query, &mut f.caret)),
             Mode::BasePick => self.base_picker.as_mut().map(|b| (&mut b.query, &mut b.caret)),
-            Mode::Normal | Mode::List | Mode::Picker | Mode::CommitPick => None,
+            Mode::Normal | Mode::List | Mode::Picker | Mode::CommitPick | Mode::WorktreePick => {
+                None
+            }
         }
     }
 
@@ -3943,6 +3986,7 @@ impl App {
             | Mode::Picker
             | Mode::BasePick
             | Mode::CommitPick
+            | Mode::WorktreePick
             | Mode::Search
             | Mode::Find => None,
         }
@@ -4595,6 +4639,13 @@ impl App {
             Mode::Picker => {
                 return vec![(A::PickAgent, Primary), (A::ClosePicker, Do), (A::MovePickerRow, Do)];
             }
+            Mode::WorktreePick => {
+                return vec![
+                    (A::PickWorktree, Primary),
+                    (A::ClosePicker, Do),
+                    (A::MovePickerRow, Do),
+                ];
+            }
             Mode::BasePick => {
                 return vec![(A::PickBaseRow, Primary), (A::ClosePicker, Do), (A::MoveBaseRow, Do)];
             }
@@ -4760,6 +4811,7 @@ impl App {
         if !out.iter().any(|&(a, _)| a == A::CommitPick) {
             out.push((A::CommitPick, Go));
         }
+        out.push((A::WorktreePick, Go));
         out.push((A::Search, Go));
         // In-file find shows wherever the read pane has content to search.
         if self.find_available() {
@@ -4878,6 +4930,88 @@ impl App {
         let Some(agent) = self.picker_rows.get(self.picker_cursor).cloned() else { return };
         self.close_picker();
         self.export_to_agent(&agent);
+    }
+
+    /// Open the worktree picker: agents' worktrees first, then this one, then git's order.
+    pub fn open_worktree_picker(&mut self) {
+        if self.mode != Mode::Normal {
+            return;
+        }
+        let listed = match git::worktrees(&self.repo) {
+            Ok(listed) => listed,
+            Err(e) => {
+                self.status = format!("worktrees: {e}");
+                return;
+            }
+        };
+        let paths: Vec<PathBuf> = listed.iter().map(|w| canonical(&w.path)).collect();
+        // A nested worktree owns its cwd over the one around it, so the longest root wins.
+        let agent_roots: Vec<&PathBuf> = herdr::agent_cwds(&self.herdr.ids)
+            .iter()
+            .filter_map(|cwd| {
+                let cwd = canonical(Path::new(cwd));
+                paths
+                    .iter()
+                    .filter(|root| cwd.starts_with(root))
+                    .max_by_key(|root| root.as_os_str().len())
+            })
+            .collect();
+        let here = canonical(&self.repo);
+        let mut rows: Vec<WorktreeRow> = listed
+            .into_iter()
+            .zip(&paths)
+            .map(|(entry, root)| WorktreeRow {
+                name: entry.path.file_name().map_or_else(
+                    || entry.path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                ),
+                branch: entry.branch,
+                current: *root == here,
+                agent: agent_roots.contains(&root),
+                parked: self.parked.get(root).copied().unwrap_or_default(),
+                path: entry.path,
+            })
+            .collect();
+        rows.sort_by_key(|row| (!row.agent, !row.current));
+        self.worktree_cursor = rows.iter().position(|row| row.current).unwrap_or(0);
+        self.worktree_rows = rows;
+        self.mode = Mode::WorktreePick;
+    }
+
+    pub fn close_worktree_picker(&mut self) {
+        if self.mode == Mode::WorktreePick {
+            self.mode = Mode::Normal;
+        }
+        self.worktree_rows.clear();
+        self.worktree_cursor = 0;
+    }
+
+    pub fn worktree_picker_move(&mut self, delta: isize) {
+        if self.mode == Mode::WorktreePick && !self.worktree_rows.is_empty() {
+            self.worktree_cursor = step(self.worktree_cursor, delta, self.worktree_rows.len());
+        }
+    }
+
+    /// Highlight `row`; past the end is inert, never clamped.
+    pub fn worktree_picker_goto(&mut self, row: usize) {
+        if self.mode == Mode::WorktreePick && row < self.worktree_rows.len() {
+            self.worktree_cursor = row;
+        }
+    }
+
+    /// Pick the highlighted worktree; another one ends this loop, which reopens on it.
+    pub fn worktree_picker_pick(&mut self) {
+        let Some(row) = self.worktree_rows.get(self.worktree_cursor).cloned() else { return };
+        self.close_worktree_picker();
+        if row.current {
+            return;
+        }
+        // Removed since the list froze, it would reopen on nothing.
+        if !row.path.is_dir() {
+            self.status = format!("{} is gone", row.name);
+            return;
+        }
+        self.switch_to = Some(row.path);
     }
 
     /// Whether the base picker opens: a file tab without `--base`.
@@ -5204,7 +5338,7 @@ impl App {
     pub fn unsent(&self) -> usize {
         let draft =
             matches!(self.mode, Mode::Composing { editing: None }) && !self.input.trim().is_empty();
-        self.store.len() + usize::from(draft)
+        self.store.len() + usize::from(draft) + self.parked.values().sum::<usize>()
     }
 
     /// Whether the footer is the `Normal` bar with `?` and bands.
