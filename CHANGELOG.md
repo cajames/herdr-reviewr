@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - **Worktree picker**: `W` lists this clone's worktrees, the ones your agents work in first, and reviews the one you pick in the same pane. Each worktree keeps its own comments: a send or copy takes only the reviewed worktree's, and the rest wait for you to switch back.
 - **Breaking: `W` is a new default key.** A `[keybindings]` config that already uses `W` now collides and must move it.
+- **Stacked PRs**: `b` again in the branch scope flips the base between the default branch and the open PR's base. The flip holds for the worktree, like a `B` pick.
 
 ## [0.48.0] — 2026-10-19
 
