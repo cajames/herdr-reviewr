@@ -96,7 +96,15 @@ pub fn run() -> Result<()> {
     if let Some(note) = &cfg.removed_flag {
         app.status.clone_from(note);
     }
-    let result = event_loop(&mut terminal, &mut app, &cfg);
+    let mut result = event_loop(&mut terminal, &mut app, &cfg);
+    // A picked worktree reopens the loop there, so every worker restarts on it.
+    let mut parked = std::collections::HashMap::new();
+    while result.is_ok()
+        && let Some(target) = app.switch_to.take()
+    {
+        app = switch_worktree(&cfg, &mut app, &target, &mut parked);
+        result = event_loop(&mut terminal, &mut app, &cfg);
+    }
     herdr::clear_pane_label(&app.herdr.ids);
     git::end_sessions();
     result
@@ -241,6 +249,34 @@ fn invalidate_screen(terminal: &mut DefaultTerminal) -> Result<()> {
 /// The reviewed repository's top level, one spelling for the app and the worker; else as given.
 fn repo_root(cfg: &Config) -> std::path::PathBuf {
     git::toplevel(&cfg.repo).unwrap_or_else(|| cfg.repo.clone())
+}
+
+/// The app reopened on `target`: its parked comments back, `old`'s parked, the session carried.
+pub fn switch_worktree<S: std::hash::BuildHasher>(
+    cfg: &Config,
+    old: &mut App,
+    target: &std::path::Path,
+    parked: &mut std::collections::HashMap<std::path::PathBuf, crate::model::CommentStore, S>,
+) -> App {
+    let cfg = Config { repo: target.to_path_buf(), ..cfg.clone() };
+    let mut app = app_for(&cfg, &config::plugin_config(cfg.plugin_config_dir.as_deref()));
+    parked.insert(app::canonical(&old.repo), std::mem::take(&mut old.store));
+    app.store = parked.remove(&app::canonical(&app.repo)).unwrap_or_default();
+    app.parked = parked
+        .iter()
+        .filter(|(_, store)| !store.is_empty())
+        .map(|(root, store)| (root.clone(), store.len()))
+        .collect();
+    app.last_sent_pane = old.last_sent_pane.take();
+    app.herdr.ids = old.herdr.ids.clone();
+    if app.config_error().is_some() {
+        return app;
+    }
+    app.status = match app.reload() {
+        Ok(()) => format!("reviewing {}", app.repo.display()),
+        Err(e) => format!("load failed: {e}"),
+    };
+    app
 }
 
 /// The startup app for one config snapshot: ready, or blocked on its error.
@@ -883,7 +919,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
     // Fetch the PR at open, so the tab is ready when visited.
     app.pr_pending = None;
     let result: Result<()> = (|| {
-        while !app.should_quit {
+        while !app.should_quit && app.switch_to.is_none() {
             if let Ok((epoch, target, mut recovered)) = recovery_rx.try_recv() {
                 recovery_inflight = false;
                 if epoch == config_epoch {
@@ -1391,7 +1427,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             if app.editor_request.is_some() {
                 run_editor(terminal, app, painted_frame.editor(), &mut open_editors)?;
             }
-            if app.should_quit {
+            if app.should_quit || app.switch_to.is_some() {
                 break;
             }
             // Stillness inside the pane is a held button; only an edge exit completes.
@@ -1401,7 +1437,10 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
         }
         Ok(())
     })();
-    restore_terminal();
+    // A switch keeps the screen for the loop that reopens on the picked worktree.
+    if result.is_err() || app.switch_to.is_none() {
+        restore_terminal();
+    }
     drain_pr_shutdown(&mut pr, &probe_rx, &pr_rx);
     result
 }
@@ -1804,6 +1843,21 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
+    if app.mode == Mode::WorktreePick {
+        let bare = key.modifiers.is_empty();
+        match (action, key.code) {
+            (_, Esc) => app.close_worktree_picker(),
+            (_, Enter) if bare => app.worktree_picker_pick(),
+            (_, Char(c @ '1'..='9')) if bare => {
+                app.worktree_picker_goto(c as usize - '1' as usize);
+            }
+            (Some(K::Down), _) => app.worktree_picker_move(1),
+            (Some(K::Up), _) => app.worktree_picker_move(-1),
+            _ => {}
+        }
+        return Ok(());
+    }
+
     // Base picker: every printable filters, so a branch `qa` is typable; vertical keys move.
     if app.mode == Mode::BasePick {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -1929,6 +1983,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::ScopeCommits => app.set_scope(Scope::Commits)?,
             K::BasePick => app.open_base_picker(),
             K::CommitPick => app.open_commit_picker(),
+            K::WorktreePick => app.open_worktree_picker(),
             K::Select => app.toggle_select(),
             K::Comment => app.start_comment(),
             // `delete` needs the diff focused, never an off-screen cursor; `edit` works anywhere.
@@ -2451,6 +2506,13 @@ fn dispatch_mouse(
                 match ui::hit_picker_row(area, app, m.column, m.row) {
                     Some(i) if i == app.picker_cursor => app.picker_pick(),
                     Some(i) => app.picker_goto(i),
+                    None => {}
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) if app.mode == Mode::WorktreePick => {
+                match ui::hit_worktree_row(area, app, m.column, m.row) {
+                    Some(i) if i == app.worktree_cursor => app.worktree_picker_pick(),
+                    Some(i) => app.worktree_picker_goto(i),
                     None => {}
                 }
             }

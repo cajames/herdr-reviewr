@@ -446,6 +446,18 @@ fn agent_list() -> Result<Vec<AgentPane>, HerdrError> {
     parse_agents(&call(&["agent", "list"])?)
 }
 
+/// Where this workspace's other agents work; empty outside herdr or when herdr can't answer.
+pub fn agent_cwds(ids: &PaneIds) -> Vec<String> {
+    if ids.workspace.is_none() {
+        return Vec::new();
+    }
+    let Ok(agents) = agent_list() else { return Vec::new() };
+    candidates(&agents, ids.workspace.as_deref(), ids.pane.as_deref())
+        .into_iter()
+        .filter_map(|agent| agent.cwd.clone())
+        .collect()
+}
+
 /// What `Send` does: one agent sends, several open the picker, none refuses.
 pub fn send_target(ids: &PaneIds) -> Result<SendTarget, SendError> {
     let (ws, me) = (ids.workspace.clone(), ids.pane.clone());

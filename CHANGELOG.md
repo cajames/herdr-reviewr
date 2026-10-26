@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Worktree picker**: `W` lists this clone's worktrees, the ones your agents work in first, and reviews the one you pick in the same pane. Each worktree keeps its own comments: a send or copy takes only the reviewed worktree's, and the rest wait for you to switch back.
+- **Breaking: `W` is a new default key.** A `[keybindings]` config that already uses `W` now collides and must move it.
+
 ## [0.48.0] — 2026-10-19
 
 ### Added
