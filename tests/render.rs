@@ -172,7 +172,6 @@ fn the_base_picker_anchors_the_terminal_cursor_at_its_caret() {
         rows: vec![BaseChoice::Branch {
             name: "main".to_string(),
             pr_base: false,
-            parent: false,
             is_default: true,
             current: false,
             tip_secs: 1,
@@ -3379,7 +3378,6 @@ fn worst_case_picker(app: &mut App) {
         rows: vec![BaseChoice::Branch {
             name: "main".to_string(),
             pr_base: true,
-            parent: false,
             is_default: true,
             current: true,
             tip_secs: now_minus(2 * 3600),

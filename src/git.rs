@@ -750,43 +750,6 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
     Ok(BaseResolution { status: BaseStatus { winner, skipped }, default, candidates, recorded })
 }
 
-/// The local branch HEAD stacks on: fewest commits behind HEAD, and strictly closer than
-/// `default`. `None` with no such branch, or a git older than `ahead-behind` (2.41).
-pub fn parent_branch(repo: &Path, default: &str) -> Option<String> {
-    let format = "--format=%(refname) %(ahead-behind:HEAD)";
-    let args = ["for-each-ref", "--no-contains", "HEAD", format, "refs/heads", "refs/remotes"];
-    let out = git(repo, &args).ok()?;
-    // (ref, ahead, behind): behind counts HEAD's commits the ref lacks.
-    let rows: Vec<(&str, usize, usize)> = out
-        .lines()
-        .filter_map(|line| {
-            let mut words = line.split(' ');
-            let name = words.next()?;
-            Some((name, words.next()?.parse().ok()?, words.next()?.parse().ok()?))
-        })
-        .collect();
-    // The default may live only on a remote, so its nearest spelling sets the bar.
-    let floor = rows
-        .iter()
-        .filter(|(name, ..)| {
-            name.strip_prefix("refs/heads/") == Some(default)
-                || name
-                    .strip_prefix("refs/remotes/")
-                    .and_then(|r| r.split_once('/'))
-                    .is_some_and(|(_, branch)| branch == default)
-        })
-        .map(|&(_, _, behind)| behind)
-        .min()?;
-    rows.iter()
-        .filter_map(|&(name, ahead, behind)| {
-            Some((name.strip_prefix("refs/heads/")?, ahead, behind))
-        })
-        .filter(|&(name, _, behind)| name != default && behind < floor)
-        // A sibling stacked on the same parent is as far behind, but ahead by its own commits.
-        .min_by_key(|&(_, ahead, behind)| (behind, ahead))
-        .map(|(name, ..)| name.to_string())
-}
-
 /// `origin/HEAD`'s branch, else the first existing of `init.defaultBranch`, `main`, `master`.
 pub fn default_branch_name(repo: &Path) -> Result<Option<String>, GitFail> {
     if let Some(name) = origin_default_branch(repo)? {

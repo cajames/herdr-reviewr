@@ -3364,8 +3364,6 @@ fn base_trail_words(row: &crate::app::BaseChoice, now: u64) -> Vec<String> {
     let mut words: Vec<String> = Vec::new();
     if row.pr_base() {
         words.push("pr base".into());
-    } else if row.parent() {
-        words.push("parent".into());
     }
     if row.is_default() {
         words.push("default".into());
